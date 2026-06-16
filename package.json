@@ -4,13 +4,12 @@
   "version": "2.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
-    "start": "node dist/server.cjs",
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "start": "vite preview --host 0.0.0.0",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "deploy:cloudrun": "gcloud run deploy wordclass --source . --region southamerica-east1 --allow-unauthenticated --project wordclass-934a0",
-    "deploy:hosting": "firebase deploy --only hosting --project wordclass-934a0"
+    "deploy:hosting": "firebase deploy --only hosting,firestore:rules --project wordclass-934a0"
   },
   "overrides": {
     "esbuild": "0.28.1",
@@ -26,6 +25,7 @@
     "d3-cloud": "^1.2.9",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
+    "firebase": "^12.14.0",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "react": "^19.0.1",

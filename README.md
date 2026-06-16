@@ -50,29 +50,21 @@ npm run start
 npm run lint
 ```
 
-## Publicação
+## Publicação gratuita no Firebase
 
-Como o projeto usa Express e Socket.IO, o caminho recomendado é:
+Este projeto está preparado para o Firebase `wordclass-934a0` usando apenas recursos do plano Spark, sem cartão e sem Blaze.
 
-- Firebase Hosting para o domínio e arquivos públicos.
-- Cloud Run para o servidor Node em tempo real.
-- GitHub para versionamento e deploy automatizado.
+A publicação usa:
 
-## Firebase
+- Firebase Hosting: entrega o site no endereço `https://wordclass-934a0.web.app`.
+- Cloud Firestore: sincroniza as apresentações, respostas e telão em tempo real.
+- GitHub: versionamento do projeto.
 
-Este projeto está preparado para o Firebase `wordclass-934a0`.
-
-O Firebase Hosting sozinho não mantém o servidor ao vivo. Por isso, a configuração usa:
-
-- Cloud Run: executa o servidor Node com as respostas em tempo real.
-- Firebase Hosting: entrega o endereço final `https://wordclass-934a0.web.app` e envia as visitas para o Cloud Run.
-
-Com Firebase CLI e Google Cloud CLI instalados e autenticados, publique com:
+Com Firebase CLI instalado e autenticado, publique com:
 
 ```bash
 npm run build
-npm run deploy:cloudrun
 npm run deploy:hosting
 ```
 
-O serviço criado no Cloud Run se chama `wordclass` e usa a região `southamerica-east1`.
+Não é usado Cloud Run, Cloud Functions ou App Hosting, porque esses caminhos exigem conta de faturamento.
