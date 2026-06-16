@@ -56,7 +56,7 @@ Este projeto está preparado para o Firebase `wordclass-934a0` usando apenas rec
 
 A publicação usa:
 
-- Firebase Hosting: entrega o site no endereço `https://wordclass-934a0.web.app`.
+- Firebase Hosting: entrega o site no endereço `https://wordclassapp.web.app`.
 - Cloud Firestore: sincroniza as apresentações, respostas e telão em tempo real.
 - GitHub: versionamento do projeto.
 

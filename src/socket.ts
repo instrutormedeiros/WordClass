@@ -76,7 +76,7 @@ const SLIDE_TEMPLATES: Record<SlideType, { question: string; options?: string[];
   list: { question: "Lista", content: "Primeiro ponto\nSegundo ponto\nTerceiro ponto" },
   diagram: { question: "Diagrama", content: "Entrada -> Processo -> Resultado" },
   image: { question: "Imagem", content: "Adicione aqui uma legenda ou URL de imagem." },
-  "qr-code": { question: "QR Code", content: "https://wordclass-934a0.web.app" },
+  "qr-code": { question: "QR Code", content: "https://wordclassapp.web.app" },
   youtube: { question: "Vídeo", content: "Cole aqui o link do YouTube." },
   embed: { question: "Embed", content: "Cole aqui o conteúdo incorporado." },
 };

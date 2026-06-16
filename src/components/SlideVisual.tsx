@@ -135,7 +135,7 @@ export function SlideVisual({
   }
 
   if (slide.type === "qr-code") {
-    const value = slide.content || "https://wordclass-934a0.web.app";
+    const value = slide.content || "https://wordclassapp.web.app";
     return (
       <div className="grid h-full place-items-center">
         <div className="rounded-[2rem] border-2 border-[#111827] bg-white p-8 text-center shadow-[8px_8px_0_#111827]">
