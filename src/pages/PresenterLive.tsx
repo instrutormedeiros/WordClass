@@ -44,6 +44,12 @@ export default function PresenterLive() {
   const titleSaveTimer = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const slideSaveTimer = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const pendingSlidePatch = useRef<Partial<Pick<Slide, "question" | "options" | "content">>>({});
+  const isEditingTitle = useRef(false);
+  const isEditingSlideContent = useRef(false);
+  const draftTitleRef = useRef("");
+  const draftQuestionRef = useRef("");
+  const draftContentRef = useRef("");
+  const draftOptionsRef = useRef<string[]>([]);
   const presenterKey = code ? localStorage.getItem(`wordclass:presenter:${code}`) || "" : "";
 
   useEffect(() => {
@@ -61,8 +67,35 @@ export default function PresenterLive() {
       else navigate("/present");
     });
 
+    const protectLocalEdits = (updatedPresentation: PresentationType) => {
+      setPresentation((prev) => {
+        if (!prev) return updatedPresentation;
+        const activeSlideId = prev.slides[prev.currentSlideIndex]?.id;
+        return {
+          ...updatedPresentation,
+          title: isEditingTitle.current ? draftTitleRef.current : updatedPresentation.title,
+          slides: updatedPresentation.slides.map((slide) => {
+            if (!isEditingSlideContent.current || slide.id !== activeSlideId) return slide;
+            return {
+              ...slide,
+              question: draftQuestionRef.current,
+              content: draftContentRef.current,
+              options: draftOptionsRef.current,
+            };
+          }),
+        };
+      });
+    };
     const replaceSlide = (slide: Slide) => {
-      setPresentation((prev) => (prev ? { ...prev, slides: prev.slides.map((item) => (item.id === slide.id ? slide : item)) } : prev));
+      setPresentation((prev) => {
+        if (!prev) return prev;
+        const activeSlideId = prev.slides[prev.currentSlideIndex]?.id;
+        const nextSlide =
+          isEditingSlideContent.current && slide.id === activeSlideId
+            ? { ...slide, question: draftQuestionRef.current, content: draftContentRef.current, options: draftOptionsRef.current }
+            : slide;
+        return { ...prev, slides: prev.slides.map((item) => (item.id === nextSlide.id ? nextSlide : item)) };
+      });
     };
     const onWordAdded = ({ slideId, words }: { slideId: string; words: Record<string, number> }) => {
       setPresentation((prev) => (prev ? { ...prev, slides: prev.slides.map((slide) => (slide.id === slideId ? { ...slide, words } : slide)) } : prev));
@@ -80,9 +113,13 @@ export default function PresenterLive() {
     const onWordRemoved = ({ slideId, words }: { slideId: string; words: Record<string, number> }) => {
       setPresentation((prev) => (prev ? { ...prev, slides: prev.slides.map((slide) => (slide.id === slideId ? { ...slide, words } : slide)) } : prev));
     };
-    const onPresentationUpdated = ({ presentation: updatedPresentation }: { presentation: PresentationType }) => setPresentation(updatedPresentation);
+    const onPresentationUpdated = ({ presentation: updatedPresentation }: { presentation: PresentationType }) => protectLocalEdits(updatedPresentation);
     const onSlideChanged = ({ index, presentation: updatedPresentation }: { index: number; presentation?: PresentationType }) => {
-      setPresentation((prev) => (updatedPresentation ? updatedPresentation : prev ? { ...prev, currentSlideIndex: index } : null));
+      if (updatedPresentation) {
+        protectLocalEdits({ ...updatedPresentation, currentSlideIndex: index });
+        return;
+      }
+      setPresentation((prev) => (prev ? { ...prev, currentSlideIndex: index } : null));
     };
     const onParticipantCount = ({ count }: { count: number }) => setPresentation((prev) => (prev ? { ...prev, participantsCount: count } : prev));
 
@@ -132,6 +169,7 @@ export default function PresenterLive() {
     if (!presentation) return;
     setDraftPresentationId(presentation.id);
     setDraftTitle(presentation.title);
+    draftTitleRef.current = presentation.title;
   }, [presentation?.id]);
 
   useEffect(() => {
@@ -140,6 +178,11 @@ export default function PresenterLive() {
     setDraftQuestion(currentSlide.question);
     setDraftContent(currentSlide.content);
     setDraftOptions(currentSlide.options);
+    draftQuestionRef.current = currentSlide.question;
+    draftContentRef.current = currentSlide.content;
+    draftOptionsRef.current = currentSlide.options;
+    pendingSlidePatch.current = {};
+    isEditingSlideContent.current = false;
   }, [currentSlide?.id]);
 
   useEffect(() => {
@@ -163,8 +206,15 @@ export default function PresenterLive() {
 
   const persistSlide = (patch: Partial<Pick<Slide, "question" | "options" | "content">>) => {
     if (!presentation || !currentSlide) return;
-    const nextSlide = { ...currentSlide, ...patch };
-    setPresentation({ ...presentation, slides: presentation.slides.map((slide) => (slide.id === currentSlide.id ? nextSlide : slide)) });
+    const slideId = currentSlide.id;
+    setPresentation((prev) =>
+      prev
+        ? {
+            ...prev,
+            slides: prev.slides.map((slide) => (slide.id === slideId ? { ...slide, ...patch } : slide)),
+          }
+        : prev,
+    );
     emitPresenterEvent("update_slide", { slideId: currentSlide.id, ...patch });
   };
 
@@ -175,7 +225,7 @@ export default function PresenterLive() {
       const nextPatch = pendingSlidePatch.current;
       pendingSlidePatch.current = {};
       persistSlide(nextPatch);
-    }, 500);
+    }, 900);
   };
 
   const flushPendingSlideSave = () => {
@@ -185,17 +235,40 @@ export default function PresenterLive() {
     if (Object.keys(nextPatch).length > 0) persistSlide(nextPatch);
   };
 
+  const finishSlideEditing = () => {
+    flushPendingSlideSave();
+    window.setTimeout(() => {
+      isEditingSlideContent.current = false;
+    }, 1200);
+  };
+
+  const finishTitleEditing = () => {
+    if (titleSaveTimer.current) window.clearTimeout(titleSaveTimer.current);
+    const title = draftTitleRef.current;
+    setPresentation((prev) => (prev ? { ...prev, title } : prev));
+    emitPresenterEvent("update_presentation_title", { title });
+    window.setTimeout(() => {
+      isEditingTitle.current = false;
+    }, 1200);
+  };
+
   const updateQuestionDraft = (question: string) => {
+    isEditingSlideContent.current = true;
+    draftQuestionRef.current = question;
     setDraftQuestion(question);
     scheduleSlideSave({ question });
   };
 
   const updateContentDraft = (content: string) => {
+    isEditingSlideContent.current = true;
+    draftContentRef.current = content;
     setDraftContent(content);
     scheduleSlideSave({ content });
   };
 
   const updateOptionsDraft = (options: string[]) => {
+    isEditingSlideContent.current = true;
+    draftOptionsRef.current = options;
     setDraftOptions(options);
     scheduleSlideSave({ options });
   };
@@ -217,12 +290,14 @@ export default function PresenterLive() {
   };
   const updateTitle = (title: string) => {
     if (!presentation) return;
+    isEditingTitle.current = true;
+    draftTitleRef.current = title;
     setDraftTitle(title);
     if (titleSaveTimer.current) window.clearTimeout(titleSaveTimer.current);
     titleSaveTimer.current = window.setTimeout(() => {
       setPresentation((prev) => (prev ? { ...prev, title } : prev));
       emitPresenterEvent("update_presentation_title", { title });
-    }, 500);
+    }, 900);
   };
   const goPrevious = () => changeSlide(Math.max(0, presentation.currentSlideIndex - 1));
   const goNext = () => changeSlide(Math.min(presentation.slides.length - 1, presentation.currentSlideIndex + 1));
@@ -276,6 +351,11 @@ export default function PresenterLive() {
               className="w-full min-w-0 truncate bg-transparent text-2xl font-black outline-none focus:text-[#2f6bff]"
               value={isTitleDraftReady ? draftTitle : presentation.title}
               onChange={(event) => updateTitle(event.target.value)}
+              onFocus={() => {
+                isEditingTitle.current = true;
+                draftTitleRef.current = isTitleDraftReady ? draftTitle : presentation.title;
+              }}
+              onBlur={finishTitleEditing}
               maxLength={80}
               aria-label="Título da apresentação"
             />
@@ -377,6 +457,11 @@ export default function PresenterLive() {
                 className="mb-5 w-full resize-none rounded-2xl border-2 border-transparent bg-white p-2 text-4xl font-black leading-tight outline-none focus:border-[#2f6bff]"
                 value={isDraftReady ? draftQuestion : currentSlide.question}
                 onChange={(event) => updateQuestionDraft(event.target.value)}
+                onFocus={() => {
+                  isEditingSlideContent.current = true;
+                  draftQuestionRef.current = isDraftReady ? draftQuestion : currentSlide.question;
+                }}
+                onBlur={finishSlideEditing}
                 rows={2}
                 maxLength={180}
               />
@@ -426,7 +511,16 @@ export default function PresenterLive() {
 
           <Panel title="Conteúdo do slide">
             <label className="mb-2 block text-sm font-black">Pergunta ou título</label>
-            <textarea className="min-h-24 w-full resize-none rounded-2xl border-2 border-slate-200 p-3 font-bold outline-none focus:border-[#2f6bff]" value={isDraftReady ? draftQuestion : currentSlide.question} onChange={(event) => updateQuestionDraft(event.target.value)} />
+            <textarea
+              className="min-h-24 w-full resize-none rounded-2xl border-2 border-slate-200 p-3 font-bold outline-none focus:border-[#2f6bff]"
+              value={isDraftReady ? draftQuestion : currentSlide.question}
+              onChange={(event) => updateQuestionDraft(event.target.value)}
+              onFocus={() => {
+                isEditingSlideContent.current = true;
+                draftQuestionRef.current = isDraftReady ? draftQuestion : currentSlide.question;
+              }}
+              onBlur={finishSlideEditing}
+            />
 
             {needsOptions(currentSlide.type) && (
               <div className="mt-4 space-y-2">
@@ -435,6 +529,11 @@ export default function PresenterLive() {
                   <input
                     key={index}
                     value={option}
+                    onFocus={() => {
+                      isEditingSlideContent.current = true;
+                      draftOptionsRef.current = isDraftReady ? draftOptions : currentSlide.options;
+                    }}
+                    onBlur={finishSlideEditing}
                     onChange={(event) => {
                       const nextOptions = [...(isDraftReady ? draftOptions : currentSlide.options)];
                       nextOptions[index] = event.target.value;
@@ -453,7 +552,16 @@ export default function PresenterLive() {
             {CONTENT_TYPES.includes(currentSlide.type) && (
               <div className="mt-4">
                 <label className="mb-2 block text-sm font-black">Conteúdo</label>
-                <textarea className="min-h-36 w-full resize-none rounded-2xl border-2 border-slate-200 p-3 font-bold outline-none focus:border-[#2f6bff]" value={isDraftReady ? draftContent : currentSlide.content} onChange={(event) => updateContentDraft(event.target.value)} />
+                <textarea
+                  className="min-h-36 w-full resize-none rounded-2xl border-2 border-slate-200 p-3 font-bold outline-none focus:border-[#2f6bff]"
+                  value={isDraftReady ? draftContent : currentSlide.content}
+                  onChange={(event) => updateContentDraft(event.target.value)}
+                  onFocus={() => {
+                    isEditingSlideContent.current = true;
+                    draftContentRef.current = isDraftReady ? draftContent : currentSlide.content;
+                  }}
+                  onBlur={finishSlideEditing}
+                />
               </div>
             )}
           </Panel>
