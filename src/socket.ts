@@ -1,7 +1,11 @@
 import { initializeApp } from "firebase/app";
 import {
+  addDoc,
+  collection,
+  deleteDoc,
   doc,
   getDoc,
+  getDocs,
   increment,
   onSnapshot,
   runTransaction,
@@ -30,6 +34,15 @@ type ListenerMap = Map<string, Set<Callback>>;
 interface PrivatePresentation extends Presentation {
   presenterKey: string;
   lastEffect?: { effect: string; id: string; at: number };
+}
+
+interface LiveResponse {
+  id?: string;
+  slideId: string;
+  type: SlideType;
+  value?: string;
+  values?: string[];
+  createdAt: number;
 }
 
 const DEFAULT_SETTINGS: SlideSettings = {
@@ -143,6 +156,10 @@ function presentationRef(code: string) {
   return doc(db, "presentations", code);
 }
 
+function responsesRef(code: string) {
+  return collection(db, "presentations", code, "responses");
+}
+
 async function readPresentation(code: string): Promise<PrivatePresentation | null> {
   const snapshot = await getDoc(presentationRef(code));
   return snapshot.exists() ? (snapshot.data() as PrivatePresentation) : null;
@@ -152,6 +169,7 @@ class FirebaseSocket {
   private listeners: ListenerMap = new Map();
   private unsubscribers = new Map<string, () => void>();
   private lastPresentationByCode = new Map<string, PrivatePresentation>();
+  private responsesByCode = new Map<string, LiveResponse[]>();
   private lastEffectIdByCode = new Map<string, string>();
 
   on(event: string, callback: Callback) {
@@ -179,36 +197,88 @@ class FirebaseSocket {
 
   private subscribe(code: string) {
     if (this.unsubscribers.has(code)) return;
-    const unsubscribe = onSnapshot(presentationRef(code), (snapshot) => {
+    const unsubscribePresentation = onSnapshot(presentationRef(code), (snapshot) => {
       if (!snapshot.exists()) return;
       const next = snapshot.data() as PrivatePresentation;
-      const previous = this.lastPresentationByCode.get(code);
       this.lastPresentationByCode.set(code, next);
-      const safe = publicPresentation(next);
-      this.fire("presentation_updated", { presentation: safe });
-      this.fire("participant_count", { count: next.participantsCount || 0 });
+      this.publish(code);
+    });
+    const unsubscribeResponses = onSnapshot(responsesRef(code), (snapshot) => {
+      const responses = snapshot.docs.map((item) => ({ id: item.id, ...(item.data() as Omit<LiveResponse, "id">) }));
+      responses.sort((a, b) => a.createdAt - b.createdAt);
+      this.responsesByCode.set(code, responses);
+      this.publish(code);
+    });
+    this.unsubscribers.set(code, () => {
+      unsubscribePresentation();
+      unsubscribeResponses();
+    });
+  }
 
-      if (!previous || previous.currentSlideIndex !== next.currentSlideIndex) {
-        this.fire("slide_changed", { index: next.currentSlideIndex, presentation: safe });
-      }
+  private publish(code: string) {
+    const basePresentation = this.lastPresentationByCode.get(code);
+    if (!basePresentation) return;
+    const previous = this.lastPresentationByCode.get(`${code}:published`);
+    const next = this.withAggregatedResponses(basePresentation, this.responsesByCode.get(code) || []);
+    this.lastPresentationByCode.set(`${code}:published`, next);
+    const safe = publicPresentation(next);
+    this.fire("presentation_updated", { presentation: safe });
+    this.fire("participant_count", { count: next.participantsCount || 0 });
 
-      next.slides.forEach((slide, index) => {
-        const oldSlide = previous?.slides[index];
-        if (!oldSlide || JSON.stringify(oldSlide) !== JSON.stringify(slide)) {
-          this.fire("slide_updated", { slide });
-          if (JSON.stringify(oldSlide?.words || {}) !== JSON.stringify(slide.words || {})) {
-            this.fire("word_added", { slideId: slide.id, words: slide.words || {} });
-            this.fire("word_removed", { slideId: slide.id, words: slide.words || {} });
-          }
+    if (!previous || previous.currentSlideIndex !== next.currentSlideIndex) {
+      this.fire("slide_changed", { index: next.currentSlideIndex, presentation: safe });
+    }
+
+    next.slides.forEach((slide, index) => {
+      const oldSlide = previous?.slides[index];
+      if (!oldSlide || JSON.stringify(oldSlide) !== JSON.stringify(slide)) {
+        this.fire("slide_updated", { slide });
+        if (JSON.stringify(oldSlide?.words || {}) !== JSON.stringify(slide.words || {})) {
+          this.fire("word_added", { slideId: slide.id, words: slide.words || {} });
+          this.fire("word_removed", { slideId: slide.id, words: slide.words || {} });
         }
-      });
-
-      if (next.lastEffect?.id && this.lastEffectIdByCode.get(code) !== next.lastEffect.id) {
-        this.lastEffectIdByCode.set(code, next.lastEffect.id);
-        this.fire("effect_triggered", next.lastEffect);
       }
     });
-    this.unsubscribers.set(code, unsubscribe);
+
+    if (next.lastEffect?.id && this.lastEffectIdByCode.get(code) !== next.lastEffect.id) {
+      this.lastEffectIdByCode.set(code, next.lastEffect.id);
+      this.fire("effect_triggered", next.lastEffect);
+    }
+  }
+
+  private withAggregatedResponses(presentation: PrivatePresentation, responses: LiveResponse[]): PrivatePresentation {
+    const slides = presentation.slides.map((slide) => ({
+      ...slide,
+      words: { ...slide.words },
+      votes: { ...slide.votes },
+      responses: [...slide.responses],
+      ratings: { ...slide.ratings },
+    }));
+
+    responses.forEach((response) => {
+      const index = slides.findIndex((slide) => slide.id === response.slideId);
+      if (index < 0) return;
+      const slide = slides[index];
+      if (response.type === "wordcloud") {
+        (response.values || []).forEach((word) => {
+          slide.words[word] = (slide.words[word] || 0) + 1;
+        });
+        return;
+      }
+      const value = response.value || response.values?.[0] || "";
+      if (!value) return;
+      if (response.type === "rating-scale") {
+        slide.ratings[value] = (slide.ratings[value] || 0) + 1;
+        return;
+      }
+      if (slide.options.length > 0) {
+        slide.votes[value] = (slide.votes[value] || 0) + 1;
+        return;
+      }
+      slide.responses = [...slide.responses, value].slice(-300);
+    });
+
+    return { ...presentation, slides };
   }
 
   private async handle(event: string, payload: any, callback?: Callback) {
@@ -225,7 +295,7 @@ class FirebaseSocket {
       }
       await this.markParticipant(code, event);
       this.subscribe(code);
-      callback?.({ success: true, presentation: publicPresentation(presentation) });
+      callback?.({ success: true, presentation: publicPresentation(this.withAggregatedResponses(presentation, this.responsesByCode.get(code) || [])) });
       return;
     }
 
@@ -257,6 +327,11 @@ class FirebaseSocket {
       return;
     }
 
+    if (event === "submit_response" || event === "submit_words") {
+      await this.submitResponse(payload, callback);
+      return;
+    }
+
     await this.presenterAction(event, payload, callback);
   }
 
@@ -275,19 +350,12 @@ class FirebaseSocket {
       const snapshot = await transaction.get(ref);
       if (!snapshot.exists()) throw new Error("Código não encontrado.");
       const presentation = snapshot.data() as PrivatePresentation;
-      const isPresenterEvent = !["submit_response", "submit_words"].includes(event);
-      if (isPresenterEvent && payload.presenterKey !== presentation.presenterKey) throw new Error("Acesso do apresentador inválido.");
+      if (payload.presenterKey !== presentation.presenterKey) throw new Error("Acesso do apresentador inválido.");
 
       let slides = [...presentation.slides];
       let currentSlideIndex = presentation.currentSlideIndex;
       const slideIndex = slides.findIndex((slide) => slide.id === payload.slideId);
       const currentSlide = slideIndex >= 0 ? slides[slideIndex] : slides[currentSlideIndex];
-
-      if (event === "submit_response" || event === "submit_words") {
-        if (!currentSlide || !currentSlide.settings.isOpen) throw new Error("O apresentador pausou novas respostas.");
-        const nextSlide = this.applyResponse(currentSlide, payload);
-        slides = slides.map((slide) => (slide.id === nextSlide.id ? nextSlide : slide));
-      }
 
       if (event === "change_slide") currentSlideIndex = Math.max(0, Math.min(Number(payload.index || 0), slides.length - 1));
       if (event === "add_slide") slides = [...slides, createSlide(payload.type)];
@@ -330,27 +398,51 @@ class FirebaseSocket {
       if (event === "trigger_effect") update.lastEffect = { effect: String(payload.effect || "confetti"), id: randomId(), at: Date.now() };
       transaction.update(ref, update);
     });
+    if (event === "clear_words") await this.deleteResponses(String(payload.code || ""), String(payload.slideId || ""));
+    if (event === "remove_word") await this.deleteWordResponses(String(payload.code || ""), String(payload.slideId || ""), String(payload.word || ""));
     callback?.({ success: true });
   }
 
-  private applyResponse(slide: Slide, payload: any): Slide {
+  private async submitResponse(payload: any, callback?: Callback) {
+    const code = String(payload.code || "");
+    const presentation = await readPresentation(code);
+    if (!presentation) throw new Error("Código não encontrado.");
+    const slide = presentation.slides.find((item) => item.id === payload.slideId) || presentation.slides[presentation.currentSlideIndex];
+    if (!slide?.settings.isOpen) throw new Error("O apresentador pausou novas respostas.");
+    const response = this.prepareResponse(slide, payload);
+    if (!response) throw new Error("Nada para enviar.");
+    await addDoc(responsesRef(code), { ...response, createdAtServer: serverTimestamp() });
+    callback?.({ success: true });
+  }
+
+  private prepareResponse(slide: Slide, payload: any): Omit<LiveResponse, "id"> | null {
     const value = String(payload.value || "").trim();
     const values = Array.isArray(payload.values) ? payload.values.map(String) : value ? [value] : [];
     if (slide.type === "wordcloud") {
-      const nextWords = { ...slide.words };
-      values
+      const cleanWords = values
         .map(normalizeWord)
         .filter(Boolean)
         .filter((word) => !slide.settings.profanityFilter || !isBlocked(word))
-        .slice(0, slide.settings.maxWordsPerSubmit)
-        .forEach((word) => {
-          nextWords[word] = (nextWords[word] || 0) + 1;
-        });
-      return { ...slide, words: nextWords };
+        .slice(0, slide.settings.maxWordsPerSubmit);
+      if (cleanWords.length === 0) return null;
+      return { slideId: slide.id, type: slide.type, values: cleanWords, createdAt: Date.now() };
     }
-    if (slide.type === "rating-scale") return { ...slide, ratings: { ...slide.ratings, [value]: (slide.ratings[value] || 0) + 1 } };
-    if (slide.options.length > 0) return { ...slide, votes: { ...slide.votes, [value]: (slide.votes[value] || 0) + 1 } };
-    return { ...slide, responses: [...slide.responses, value].filter(Boolean).slice(-300) };
+    if (!value) return null;
+    return { slideId: slide.id, type: slide.type, value, createdAt: Date.now() };
+  }
+
+  private async deleteResponses(code: string, slideId: string) {
+    const snapshot = await getDocs(responsesRef(code));
+    await Promise.all(snapshot.docs.filter((item) => item.data().slideId === slideId).map((item) => deleteDoc(item.ref)));
+  }
+
+  private async deleteWordResponses(code: string, slideId: string, word: string) {
+    const snapshot = await getDocs(responsesRef(code));
+    await Promise.all(
+      snapshot.docs
+        .filter((item) => item.data().slideId === slideId && Array.isArray(item.data().values) && item.data().values.includes(word))
+        .map((item) => deleteDoc(item.ref)),
+    );
   }
 }
 
