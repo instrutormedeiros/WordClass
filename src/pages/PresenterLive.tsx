@@ -41,8 +41,6 @@ export default function PresenterLive() {
   const [draftQuestion, setDraftQuestion] = useState("");
   const [draftContent, setDraftContent] = useState("");
   const [draftOptions, setDraftOptions] = useState<string[]>([]);
-  const titleSaveTimer = useRef<ReturnType<typeof window.setTimeout> | null>(null);
-  const slideSaveTimer = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const pendingSlidePatch = useRef<Partial<Pick<Slide, "question" | "options" | "content">>>({});
   const isEditingTitle = useRef(false);
   const isEditingSlideContent = useRef(false);
@@ -187,8 +185,6 @@ export default function PresenterLive() {
 
   useEffect(() => {
     return () => {
-      if (titleSaveTimer.current) window.clearTimeout(titleSaveTimer.current);
-      if (slideSaveTimer.current) window.clearTimeout(slideSaveTimer.current);
     };
   }, []);
 
@@ -218,18 +214,11 @@ export default function PresenterLive() {
     emitPresenterEvent("update_slide", { slideId: currentSlide.id, ...patch });
   };
 
-  const scheduleSlideSave = (patch: Partial<Pick<Slide, "question" | "options" | "content">>) => {
+  const queueSlideSave = (patch: Partial<Pick<Slide, "question" | "options" | "content">>) => {
     pendingSlidePatch.current = { ...pendingSlidePatch.current, ...patch };
-    if (slideSaveTimer.current) window.clearTimeout(slideSaveTimer.current);
-    slideSaveTimer.current = window.setTimeout(() => {
-      const nextPatch = pendingSlidePatch.current;
-      pendingSlidePatch.current = {};
-      persistSlide(nextPatch);
-    }, 900);
   };
 
   const flushPendingSlideSave = () => {
-    if (slideSaveTimer.current) window.clearTimeout(slideSaveTimer.current);
     const nextPatch = pendingSlidePatch.current;
     pendingSlidePatch.current = {};
     if (Object.keys(nextPatch).length > 0) persistSlide(nextPatch);
@@ -243,7 +232,6 @@ export default function PresenterLive() {
   };
 
   const finishTitleEditing = () => {
-    if (titleSaveTimer.current) window.clearTimeout(titleSaveTimer.current);
     const title = draftTitleRef.current;
     setPresentation((prev) => (prev ? { ...prev, title } : prev));
     emitPresenterEvent("update_presentation_title", { title });
@@ -256,21 +244,21 @@ export default function PresenterLive() {
     isEditingSlideContent.current = true;
     draftQuestionRef.current = question;
     setDraftQuestion(question);
-    scheduleSlideSave({ question });
+    queueSlideSave({ question });
   };
 
   const updateContentDraft = (content: string) => {
     isEditingSlideContent.current = true;
     draftContentRef.current = content;
     setDraftContent(content);
-    scheduleSlideSave({ content });
+    queueSlideSave({ content });
   };
 
   const updateOptionsDraft = (options: string[]) => {
     isEditingSlideContent.current = true;
     draftOptionsRef.current = options;
     setDraftOptions(options);
-    scheduleSlideSave({ options });
+    queueSlideSave({ options });
   };
 
   const updateSettings = (settings: Partial<SlideSettings>) => {
@@ -293,11 +281,6 @@ export default function PresenterLive() {
     isEditingTitle.current = true;
     draftTitleRef.current = title;
     setDraftTitle(title);
-    if (titleSaveTimer.current) window.clearTimeout(titleSaveTimer.current);
-    titleSaveTimer.current = window.setTimeout(() => {
-      setPresentation((prev) => (prev ? { ...prev, title } : prev));
-      emitPresenterEvent("update_presentation_title", { title });
-    }, 900);
   };
   const goPrevious = () => changeSlide(Math.max(0, presentation.currentSlideIndex - 1));
   const goNext = () => changeSlide(Math.min(presentation.slides.length - 1, presentation.currentSlideIndex + 1));
