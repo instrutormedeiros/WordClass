@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import QRCode from "react-qr-code";
 import { useNavigate, useParams } from "react-router-dom";
@@ -35,6 +35,15 @@ export default function PresenterLive() {
   const navigate = useNavigate();
   const [presentation, setPresentation] = useState<PresentationType | null>(null);
   const [copied, setCopied] = useState(false);
+  const [draftPresentationId, setDraftPresentationId] = useState("");
+  const [draftTitle, setDraftTitle] = useState("");
+  const [draftSlideId, setDraftSlideId] = useState("");
+  const [draftQuestion, setDraftQuestion] = useState("");
+  const [draftContent, setDraftContent] = useState("");
+  const [draftOptions, setDraftOptions] = useState<string[]>([]);
+  const titleSaveTimer = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const slideSaveTimer = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const pendingSlidePatch = useRef<Partial<Pick<Slide, "question" | "options" | "content">>>({});
   const presenterKey = code ? localStorage.getItem(`wordclass:presenter:${code}`) || "" : "";
 
   useEffect(() => {
@@ -97,9 +106,19 @@ export default function PresenterLive() {
   }, [code, navigate, presenterKey]);
 
   const currentSlide = presentation?.slides[presentation.currentSlideIndex];
+  const isTitleDraftReady = presentation ? draftPresentationId === presentation.id : false;
+  const isDraftReady = currentSlide ? draftSlideId === currentSlide.id : false;
+  const currentSlideWithDraft = currentSlide
+    ? {
+        ...currentSlide,
+        question: isDraftReady ? draftQuestion : currentSlide.question,
+        content: isDraftReady ? draftContent : currentSlide.content,
+        options: isDraftReady ? draftOptions : currentSlide.options,
+      }
+    : undefined;
   const joinUrl = `${window.location.origin}/join/${code}`;
   const screenUrl = `${window.location.origin}/screen/${code}`;
-  const currentTotal = currentSlide ? totalResponses(currentSlide) : 0;
+  const currentTotal = currentSlideWithDraft ? totalResponses(currentSlideWithDraft) : 0;
   const topWords = useMemo(
     () => Object.entries((currentSlide?.words || {}) as Record<string, number>).map(([text, value]) => ({ text, value })).sort((a, b) => b.value - a.value),
     [currentSlide?.words],
@@ -109,6 +128,27 @@ export default function PresenterLive() {
     socket.emit(event, { code, presenterKey, ...payload });
   };
 
+  useEffect(() => {
+    if (!presentation) return;
+    setDraftPresentationId(presentation.id);
+    setDraftTitle(presentation.title);
+  }, [presentation?.id]);
+
+  useEffect(() => {
+    if (!currentSlide) return;
+    setDraftSlideId(currentSlide.id);
+    setDraftQuestion(currentSlide.question);
+    setDraftContent(currentSlide.content);
+    setDraftOptions(currentSlide.options);
+  }, [currentSlide?.id]);
+
+  useEffect(() => {
+    return () => {
+      if (titleSaveTimer.current) window.clearTimeout(titleSaveTimer.current);
+      if (slideSaveTimer.current) window.clearTimeout(slideSaveTimer.current);
+    };
+  }, []);
+
   const handleCopy = async () => {
     await navigator.clipboard.writeText(joinUrl);
     setCopied(true);
@@ -116,15 +156,48 @@ export default function PresenterLive() {
   };
 
   const changeSlide = (index: number) => {
+    flushPendingSlideSave();
     emitPresenterEvent("change_slide", { index });
     setPresentation((prev) => (prev ? { ...prev, currentSlideIndex: index } : prev));
   };
 
-  const updateSlide = (patch: Partial<Pick<Slide, "question" | "options" | "content">>) => {
+  const persistSlide = (patch: Partial<Pick<Slide, "question" | "options" | "content">>) => {
     if (!presentation || !currentSlide) return;
     const nextSlide = { ...currentSlide, ...patch };
     setPresentation({ ...presentation, slides: presentation.slides.map((slide) => (slide.id === currentSlide.id ? nextSlide : slide)) });
     emitPresenterEvent("update_slide", { slideId: currentSlide.id, ...patch });
+  };
+
+  const scheduleSlideSave = (patch: Partial<Pick<Slide, "question" | "options" | "content">>) => {
+    pendingSlidePatch.current = { ...pendingSlidePatch.current, ...patch };
+    if (slideSaveTimer.current) window.clearTimeout(slideSaveTimer.current);
+    slideSaveTimer.current = window.setTimeout(() => {
+      const nextPatch = pendingSlidePatch.current;
+      pendingSlidePatch.current = {};
+      persistSlide(nextPatch);
+    }, 500);
+  };
+
+  const flushPendingSlideSave = () => {
+    if (slideSaveTimer.current) window.clearTimeout(slideSaveTimer.current);
+    const nextPatch = pendingSlidePatch.current;
+    pendingSlidePatch.current = {};
+    if (Object.keys(nextPatch).length > 0) persistSlide(nextPatch);
+  };
+
+  const updateQuestionDraft = (question: string) => {
+    setDraftQuestion(question);
+    scheduleSlideSave({ question });
+  };
+
+  const updateContentDraft = (content: string) => {
+    setDraftContent(content);
+    scheduleSlideSave({ content });
+  };
+
+  const updateOptionsDraft = (options: string[]) => {
+    setDraftOptions(options);
+    scheduleSlideSave({ options });
   };
 
   const updateSettings = (settings: Partial<SlideSettings>) => {
@@ -134,12 +207,22 @@ export default function PresenterLive() {
     emitPresenterEvent("update_slide_settings", { slideId: currentSlide.id, settings: nextSettings });
   };
 
-  const addSlide = (type: SlideType) => emitPresenterEvent("add_slide", { type });
-  const addTemplate = (template: "classroom" | "meeting" | "event") => emitPresenterEvent("add_template", { template });
+  const addSlide = (type: SlideType) => {
+    flushPendingSlideSave();
+    emitPresenterEvent("add_slide", { type });
+  };
+  const addTemplate = (template: "classroom" | "meeting" | "event") => {
+    flushPendingSlideSave();
+    emitPresenterEvent("add_template", { template });
+  };
   const updateTitle = (title: string) => {
     if (!presentation) return;
-    setPresentation({ ...presentation, title });
-    emitPresenterEvent("update_presentation_title", { title });
+    setDraftTitle(title);
+    if (titleSaveTimer.current) window.clearTimeout(titleSaveTimer.current);
+    titleSaveTimer.current = window.setTimeout(() => {
+      setPresentation((prev) => (prev ? { ...prev, title } : prev));
+      emitPresenterEvent("update_presentation_title", { title });
+    }, 500);
   };
   const goPrevious = () => changeSlide(Math.max(0, presentation.currentSlideIndex - 1));
   const goNext = () => changeSlide(Math.min(presentation.slides.length - 1, presentation.currentSlideIndex + 1));
@@ -148,7 +231,14 @@ export default function PresenterLive() {
     emitPresenterEvent("remove_word", { slideId: currentSlide.id, word });
   };
   const triggerEffect = (effect: "confetti" | "applause" | "drumroll" | "cheer") => emitPresenterEvent("trigger_effect", { effect });
-  const deleteSlide = (slideId: string) => emitPresenterEvent("delete_slide", { slideId });
+  const duplicateSlide = (slideId: string) => {
+    flushPendingSlideSave();
+    emitPresenterEvent("duplicate_slide", { slideId });
+  };
+  const deleteSlide = (slideId: string) => {
+    flushPendingSlideSave();
+    emitPresenterEvent("delete_slide", { slideId });
+  };
 
   const exportCsv = () => {
     if (!presentation) return;
@@ -168,7 +258,7 @@ export default function PresenterLive() {
     URL.revokeObjectURL(url);
   };
 
-  if (!presentation || !currentSlide) {
+  if (!presentation || !currentSlide || !currentSlideWithDraft) {
     return <div className="grid min-h-screen place-items-center bg-[#f7f3ea]"><div className="h-12 w-12 animate-spin rounded-full border-4 border-[#2f6bff] border-t-white" /></div>;
   }
 
@@ -184,7 +274,7 @@ export default function PresenterLive() {
             <p className="text-xs font-black uppercase tracking-widest text-[#2f6bff]">Painel do apresentador</p>
             <input
               className="w-full min-w-0 truncate bg-transparent text-2xl font-black outline-none focus:text-[#2f6bff]"
-              value={presentation.title}
+              value={isTitleDraftReady ? draftTitle : presentation.title}
               onChange={(event) => updateTitle(event.target.value)}
               maxLength={80}
               aria-label="Título da apresentação"
@@ -224,7 +314,7 @@ export default function PresenterLive() {
                 <span className={`pt-5 text-sm font-black ${index === presentation.currentSlideIndex ? "text-[#2f6bff]" : "text-slate-400"}`}>{index + 1}</span>
                 <button onClick={() => changeSlide(index)} className={`group relative block rounded-2xl border bg-slate-50 p-3 text-left transition ${index === presentation.currentSlideIndex ? "border-[#2f6bff] shadow-md shadow-blue-100" : "border-slate-200 hover:border-slate-300"}`}>
                   <span className="block aspect-video rounded-xl bg-white p-3">
-                    <span className="line-clamp-2 text-xs font-black">{slide.question}</span>
+                    <span className="line-clamp-2 text-xs font-black">{slide.id === currentSlide.id && isDraftReady ? draftQuestion : slide.question}</span>
                     <span className="mt-5 block text-xs font-black text-[#2f6bff]">{SLIDE_LABELS[slide.type]}</span>
                   </span>
                   {presentation.slides.length > 1 && (
@@ -285,20 +375,20 @@ export default function PresenterLive() {
 
               <textarea
                 className="mb-5 w-full resize-none rounded-2xl border-2 border-transparent bg-white p-2 text-4xl font-black leading-tight outline-none focus:border-[#2f6bff]"
-                value={currentSlide.question}
-                onChange={(event) => updateSlide({ question: event.target.value })}
+                value={isDraftReady ? draftQuestion : currentSlide.question}
+                onChange={(event) => updateQuestionDraft(event.target.value)}
                 rows={2}
                 maxLength={180}
               />
               <div className="h-[420px] rounded-[1.5rem] border border-slate-100 bg-slate-50 p-5">
-                <SlideVisual slide={currentSlide} large onWordClick={currentSlide.type === "wordcloud" ? removeWord : undefined} />
+                <SlideVisual slide={currentSlideWithDraft} large onWordClick={currentSlide.type === "wordcloud" ? removeWord : undefined} />
               </div>
             </section>
 
             <section className="flex flex-wrap justify-center gap-3">
               <button onClick={() => window.open(`/join/${code}`, "_blank")} className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-5 py-3 font-black text-slate-800 shadow-sm transition hover:border-[#2f6bff] hover:text-[#2f6bff]"><Smartphone className="h-4 w-4" /> Vista do aluno</button>
               <button onClick={() => emitPresenterEvent("clear_words", { slideId: currentSlide.id })} className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-5 py-3 font-black text-slate-800 shadow-sm transition hover:border-[#2f6bff] hover:text-[#2f6bff]"><RotateCcw className="h-4 w-4" /> Limpar resultados</button>
-              <button onClick={() => emitPresenterEvent("duplicate_slide", { slideId: currentSlide.id })} className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-5 py-3 font-black text-slate-800 shadow-sm transition hover:border-[#2f6bff] hover:text-[#2f6bff]"><Copy className="h-4 w-4" /> Duplicar</button>
+              <button onClick={() => duplicateSlide(currentSlide.id)} className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-5 py-3 font-black text-slate-800 shadow-sm transition hover:border-[#2f6bff] hover:text-[#2f6bff]"><Copy className="h-4 w-4" /> Duplicar</button>
               <button onClick={() => deleteSlide(currentSlide.id)} disabled={presentation.slides.length <= 1} className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-5 py-3 font-black text-slate-800 shadow-sm transition hover:border-rose-300 hover:text-rose-600 disabled:opacity-40"><Trash2 className="h-4 w-4" /> Excluir</button>
             </section>
           </div>
@@ -336,31 +426,34 @@ export default function PresenterLive() {
 
           <Panel title="Conteúdo do slide">
             <label className="mb-2 block text-sm font-black">Pergunta ou título</label>
-            <textarea className="min-h-24 w-full resize-none rounded-2xl border-2 border-slate-200 p-3 font-bold outline-none focus:border-[#2f6bff]" value={currentSlide.question} onChange={(event) => updateSlide({ question: event.target.value })} />
+            <textarea className="min-h-24 w-full resize-none rounded-2xl border-2 border-slate-200 p-3 font-bold outline-none focus:border-[#2f6bff]" value={isDraftReady ? draftQuestion : currentSlide.question} onChange={(event) => updateQuestionDraft(event.target.value)} />
 
             {needsOptions(currentSlide.type) && (
               <div className="mt-4 space-y-2">
                 <p className="text-sm font-black">Opções</p>
-                {currentSlide.options.map((option, index) => (
+                {(isDraftReady ? draftOptions : currentSlide.options).map((option, index) => (
                   <input
                     key={index}
                     value={option}
                     onChange={(event) => {
-                      const nextOptions = [...currentSlide.options];
+                      const nextOptions = [...(isDraftReady ? draftOptions : currentSlide.options)];
                       nextOptions[index] = event.target.value;
-                      updateSlide({ options: nextOptions });
+                      updateOptionsDraft(nextOptions);
                     }}
                     className="w-full rounded-xl border-2 border-slate-200 px-3 py-2 font-bold outline-none focus:border-[#2f6bff]"
                   />
                 ))}
-                <button onClick={() => updateSlide({ options: [...currentSlide.options, `Opção ${currentSlide.options.length + 1}`] })} className="text-sm font-black text-[#2f6bff]">Adicionar opção</button>
+                <button onClick={() => {
+                  const options = isDraftReady ? draftOptions : currentSlide.options;
+                  updateOptionsDraft([...options, `Opção ${options.length + 1}`]);
+                }} className="text-sm font-black text-[#2f6bff]">Adicionar opção</button>
               </div>
             )}
 
             {CONTENT_TYPES.includes(currentSlide.type) && (
               <div className="mt-4">
                 <label className="mb-2 block text-sm font-black">Conteúdo</label>
-                <textarea className="min-h-36 w-full resize-none rounded-2xl border-2 border-slate-200 p-3 font-bold outline-none focus:border-[#2f6bff]" value={currentSlide.content} onChange={(event) => updateSlide({ content: event.target.value })} />
+                <textarea className="min-h-36 w-full resize-none rounded-2xl border-2 border-slate-200 p-3 font-bold outline-none focus:border-[#2f6bff]" value={isDraftReady ? draftContent : currentSlide.content} onChange={(event) => updateContentDraft(event.target.value)} />
               </div>
             )}
           </Panel>
