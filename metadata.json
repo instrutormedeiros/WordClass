@@ -1,0 +1,6 @@
+{
+  "name": "WordClass",
+  "description": "WordClass: apresentações ao vivo com nuvem de palavras, QR code, presença, filtros e exportação de resultados.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
